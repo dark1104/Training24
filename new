@@ -1,0 +1,203 @@
+import random
+import time
+import json
+import pandas as pd
+from faker import Faker
+import ipaddress
+from datetime import datetime, timedelta
+import asyncio
+import orjson
+from faststream.kafka import KafkaBroker, KafkaMessage
+from faststream import FastStream
+
+
+fake = Faker()
+# Kafka configuration
+KAFKA_BOOTSTRAP_SERVERS = "192.168.91.37:9092"
+KAFKA_TOPIC = "flows"
+
+broker = KafkaBroker(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+app_fast = FastStream(broker)
+
+# Load configuration file
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+
+# Predefined set of URLs categorized by application type
+URL_CATEGORIES = {
+    "social_media": [
+        "https://www.facebook.com", "https://www.twitter.com", "https://www.linkedin.com",
+        "https://www.instagram.com", "https://www.reddit.com", "https://www.tiktok.com"
+    ],
+    "video_streaming": [
+        "https://www.youtube.com", "https://www.netflix.com", "https://www.twitch.tv",
+        "https://www.vimeo.com", "https://www.dailymotion.com", "https://www.hulu.com"
+    ],
+    "collaboration": [
+        "https://teams.microsoft.com", "https://www.slack.com", "https://zoom.us",
+        "https://meet.google.com", "https://webex.com", "https://www.skype.com"
+    ],
+    "cloud_services": [
+        "https://aws.amazon.com", "https://portal.azure.com", "https://cloud.google.com",
+        "https://www.oraclecloud.com", "https://www.digitalocean.com", "https://cloud.ibm.com"
+    ],
+    "enterprise_crm": [
+        "https://www.salesforce.com", "https://www.sap.com", "https://www.zoho.com",
+        "https://www.oracle.com/crm", "https://www.freshworks.com", "https://www.hubspot.com"
+    ],
+    "database_services": [
+        "https://cloud.mongodb.com", "https://aws.amazon.com/rds", "https://www.postgresql.org",
+        "https://www.mysql.com", "https://cassandra.apache.org", "https://www.elastic.co"
+    ]
+}
+
+# Function to get URL based on application type
+def get_application_url(application):
+    category_mapping = {
+        "HTTP": "social_media",
+        "HTTPS": "enterprise_crm",
+        "YouTube": "video_streaming",
+        "Netflix": "video_streaming",
+        "Microsoft Teams": "collaboration",
+        "Slack": "collaboration",
+        "Salesforce": "enterprise_crm",
+        "AWS": "cloud_services",
+        "Azure": "cloud_services",
+        "GCP": "cloud_services",
+        "MongoDB": "database_services",
+        "MySQL": "database_services",
+        "PostgreSQL": "database_services"
+    }
+
+    category = category_mapping.get(application, None)
+    if category and category in URL_CATEGORIES:
+        return random.choice(URL_CATEGORIES[category])
+    return None
+
+
+# Extract config parameters
+num_users = config["num_users"]
+peak_hours = config["peak_hours"]
+applications = config["applications"]
+traffic_distribution = config["traffic_distribution"]
+error_rates = config["error_rates"]
+vlans = config["vlans"]
+weekend_traffic_multiplier = config["weekend_traffic_multiplier"]
+
+# Function to generate random MAC address
+def random_mac():
+    return ':'.join([f"{random.randint(0x00, 0xFF):02x}" for _ in range(6)])
+
+# Function to generate subnet from IP address
+def get_subnet(ip):
+    return str(ipaddress.ip_network(f"{ip}/24", strict=False))
+
+# Function to map ports to application names
+def get_application_name(port):
+    for app, details in applications.items():
+        if port in details["ports"]:
+            return app
+    return "Unknown"
+
+# Function to determine if traffic is during peak hours
+def is_peak_hour(timestamp):
+    hour = timestamp.hour
+    return any(int(h.split(":")[0]) == hour for h in peak_hours)
+
+# Function to simulate IPFIX flow record
+def generate_ipfix_record():
+    start_time = fake.date_time_this_year()
+    end_time = start_time + timedelta(seconds=random.randint(1, 300))
+
+    # Distribute traffic based on subnet probabilities
+    subnet = random.choices(list(traffic_distribution.keys()), weights=traffic_distribution.values())[0]
+    src_ip = str(ipaddress.IPv4Network(subnet)[random.randint(1, 254)])
+    dst_ip = fake.ipv4()
+
+    # Assign application and port based on config
+    app = random.choices(list(applications.keys()), weights=[a["traffic_percentage"] for a in applications.values()])[0]
+    dst_port = random.choice(applications[app]["ports"])
+
+    # Adjust traffic for peak hours
+    if is_peak_hour(start_time):
+        bytes_accumulated = random.randint(50000, 1000000)
+    else:
+        bytes_accumulated = random.randint(1000, 500000)
+
+    # Error rates
+    tcp_retransmits = random.randint(0, error_rates["tcp_retransmits"]) if random.random() < 0.1 else 0
+    tcp_rst = random.randint(0, error_rates["tcp_rst"]) if random.random() < 0.05 else 0
+    tcp_fin = random.randint(0, error_rates["tcp_fin"]) if random.random() < 0.05 else 0
+    application_name = get_application_name(dst_port)
+    url = get_application_url(application_name) if dst_port in [80, 443] else None
+    protocol_mapping = {"ICMP": 0, "TCP": 6, "UDP": 17}
+    protocol = protocol_mapping[random.choice(["TCP", "UDP", "ICMP"])]
+
+
+    return {
+        "ipv4_protocol": protocol,
+        "ipv4_source_address": src_ip,
+        "ipv4_destination_address": dst_ip,
+        "ipv4_source_subnet": get_subnet(src_ip),
+        "ipv4_destination_subnet": get_subnet(dst_ip),
+        "mac_source": random_mac(),
+        "mac_destination": random_mac(),
+        "transport_source_port": random.randint(1024, 65535),
+        "transport_destination_port": dst_port,
+        "application_name": application_name,
+        "http_url": url,
+        "https_url_certificate": fake.sha256() if dst_port == 443 else None,
+        "datalink_vlan": random.choice(vlans.get(subnet, [1])),
+        "flow_start_time": start_time.isoformat(),
+        "flow_end_time": end_time.isoformat(),
+        "bytes_accumulated": bytes_accumulated,
+        "tcp_retransmits": tcp_retransmits,
+        "tcp_rst": tcp_rst,
+        "tcp_fin": tcp_fin
+    }
+
+# Function to generate multiple flow records
+def generate_ipfix_data(num_records=1000000, output_file="ipfix_data.json"):
+    print(f"Generating {num_records} IPFIX records...")
+    data = [generate_ipfix_record() for _ in range(num_records)]
+
+    with open(output_file, "w") as f:
+        json.dump(data, f, indent=2)
+
+    print(f"IPFIX data written to {data}")
+
+
+
+# if __name__ == "__main__":
+#     generate_ipfix_data(10)
+@broker.publisher(KAFKA_TOPIC)
+async def stream_ipfix_data(num_messages=1_000_000, batch_size=10_000, rate_per_second=16667):
+    """
+    Streams IPFIX records to Kafka with a specified message count, batch size, and rate.
+
+    :param num_messages: Total number of messages to send.
+    :param batch_size: Number of messages per batch.
+    :param rate_per_second: Rate limit (messages per second).
+    """
+    print(f"Streaming {num_messages} IPFIX records in batches of {batch_size} at {rate_per_second} records/sec...")
+
+    sent_messages = 0
+    async with broker:
+        while sent_messages < num_messages:
+            start_time = time.time()
+
+            for _ in range(min(batch_size, num_messages - sent_messages)):
+                record = json.dumps(generate_ipfix_record())
+                await broker.publish(record, topic=KAFKA_TOPIC)  # Send messages one by one
+
+            sent_messages += batch_size
+            elapsed_time = time.time() - start_time
+            sleep_time = max(0, batch_size / rate_per_second - elapsed_time)
+            time.sleep(sleep_time)
+
+    print(f"Finished streaming {num_messages} records.")
+if __name__ == "__main__":
+    # broker.run(stream_ipfix_data(1000000, 10000))
+    # asyncio.run(stream_ipfix_data(num_messages=1_000_000, batch_size=10_000, rate_per_second=100_000))
+    asyncio.run(stream_ipfix_data(num_messages=1_000, batch_size=10, rate_per_second=10))
